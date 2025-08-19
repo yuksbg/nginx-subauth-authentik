@@ -42,7 +42,7 @@ jobs:
 
       - name: Build for linux/amd64
         if: startsWith(github.ref, 'refs/tags/v')
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-w -s" -o .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-w -s" -o auth-service-amd64 .
 
       - name: Build for linux/arm (armv6)
         if: startsWith(github.ref, 'refs/tags/v')
