@@ -1,0 +1,35 @@
+# Auth Service Configuration
+# This file supports multiple domains with individual OAuth configurations
+
+server:
+  port: "8080"
+  host: "0.0.0.0"
+  gin_mode: "debug"  # debug, release, test
+  default_domain: "app.example.com"
+
+domains:
+  # Production domain configuration
+  app.example.com:
+    name: "localhost:8080"
+    url_prefix: "/sec/auth"
+    cookie_name: "app_session"
+    base_url: "https://app.example.com"
+    oauth:
+      client_id: "XXXX"
+      client_secret: "XXXXX"
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+        - "groups"
+      auth_url: "https://sso.XXXX.one/application/o/authorize/"
+      token_url: "https://sso.XXXX.one/application/o/token/"
+      userinfo_url: "https://sso.XXXX.one/application/o/userinfo/"
+      state_string: "random-state-prod-123"
+    cookie:
+      domain: ".localhost"
+      path: "/"
+      max_age: 86400  # 24 hours
+      secure: true
+      http_only: true
+      same_site: "lax"
