@@ -42,11 +42,11 @@ jobs:
 
       - name: Build for linux/amd64
         if: startsWith(github.ref, 'refs/tags/v')
-        run: GOOS=linux GOARCH=amd64 go build -v -o auth-service-amd64 .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-w -s" -o .
 
       - name: Build for linux/arm (armv6)
         if: startsWith(github.ref, 'refs/tags/v')
-        run: GOOS=linux GOARCH=arm GOARM=6 go build -v -o auth-service-arm6 .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build -a -installsuffix cgo -ldflags="-w -s" -o auth-service-arm6 .
 
       # Check if release exists or create it, and get upload_url
       - name: Get or Create Release
