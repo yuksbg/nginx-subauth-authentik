@@ -22,7 +22,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.25'
 
       - name: Cache Go modules
         uses: actions/cache@v4
@@ -39,9 +39,6 @@ jobs:
 
       - name: Clean up old build artifacts
         run: rm -f auth-service auth-service-amd64 auth-service-arm6
-
-      - name: Build
-        run: go build -v -o auth-service .
 
       - name: Build for linux/amd64
         if: startsWith(github.ref, 'refs/tags/v')
@@ -81,17 +78,6 @@ jobs:
               }
             }
             core.setOutput('upload_url', release.data.upload_url);
-
-      - name: Upload Release Asset
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.get_release.outputs.upload_url }}
-          asset_path: ./auth-service
-          asset_name: auth-service
-          asset_content_type: application/octet-stream
 
       - name: Upload Release Asset amd64
         if: startsWith(github.ref, 'refs/tags/v')
