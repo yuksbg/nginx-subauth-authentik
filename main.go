@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -88,6 +89,16 @@ var (
 	config         *Config
 	domainHandlers map[string]*DomainHandler
 	k              = koanf.New(".")
+
+	// Command line flags
+	configFile  = flag.String("config", "config.yaml", "Path to configuration file")
+	showHelp    = flag.Bool("help", false, "Show help message")
+	showVersion = flag.Bool("version", false, "Show version information")
+)
+
+const (
+	version = "1.0.0"
+	appName = "SSO Auth Service"
 )
 
 // loadConfig loads configuration from various sources
