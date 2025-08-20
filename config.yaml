@@ -7,29 +7,56 @@ server:
   gin_mode: "debug"  # debug, release, test
   default_domain: "app.example.com"
 
+jwt:
+  issuer: "yuks-sso-service"
+  token_duration: "24h"    # How long tokens are valid
+  refresh_before: "2h"     # Warn when token expires in 2h
+
 domains:
-  # Production domain configuration
-  app.example.com:
-    name: "localhost:8080"
-    url_prefix: "/sec/auth"
+  mikrotik.yuks.one:
+    name: "mikrotik.yuks.one"
     cookie_name: "app_session"
-    base_url: "https://app.example.com"
+    base_url: "https://mikrotik.yuks.one"
     oauth:
-      client_id: "XXXX"
-      client_secret: "XXXXX"
+      client_id: "tju8obMbETb09yiiMV58kmpi6ha8tBp1jbCrphmJ"
+      client_secret: "J3pXhBQh4MCHrM2tVxjBNBABV2qfDVz7MzckZtyJHFKe8W0qUh579XPgilmicnS9ES1CHmRG6kN5G9qvAldiImfFSRkvK5nHTNISBdjR1oOLw9l97A5l5HV8N8xjqaGq"
       scopes:
         - "openid"
         - "profile"
         - "email"
         - "groups"
-      auth_url: "https://sso.XXXX.one/application/o/authorize/"
-      token_url: "https://sso.XXXX.one/application/o/token/"
-      userinfo_url: "https://sso.XXXX.one/application/o/userinfo/"
+      auth_url: "https://sso.yuks.one/application/o/authorize/"
+      token_url: "https://sso.yuks.one/application/o/token/"
+      userinfo_url: "https://sso.yuks.one/application/o/userinfo/"
       state_string: "random-state-prod-123"
     cookie:
-      domain: ".localhost"
+      domain: ".yuks.one"
       path: "/"
       max_age: 86400  # 24 hours
       secure: true
       http_only: true
       same_site: "lax"
+
+  # Example of additional domain configuration
+  # another.example.com:
+  #   name: "another-domain"
+  #   cookie_name: "another_session"
+  #   base_url: "https://another.example.com"
+  #   oauth:
+  #     client_id: "YYYY"
+  #     client_secret: "YYYYY"
+  #     scopes:
+  #       - "openid"
+  #       - "profile"
+  #       - "email"
+  #     auth_url: "https://sso.another.one/auth"
+  #     token_url: "https://sso.another.one/token"
+  #     userinfo_url: "https://sso.another.one/userinfo"
+  #     state_string: "random-state-another-456"
+  #   cookie:
+  #     domain: ".another.example.com"
+  #     path: "/"
+  #     max_age: 86400
+  #     secure: true
+  #     http_only: true
+  #     same_site: "lax"

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -10,8 +12,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -24,6 +28,7 @@ import (
 type Config struct {
 	Server  ServerConfig            `koanf:"server"`
 	Domains map[string]DomainConfig `koanf:"domains"`
+	JWT     JWTConfig               `koanf:"jwt"`
 }
 
 // ServerConfig represents server-level configuration
@@ -32,6 +37,14 @@ type ServerConfig struct {
 	Host          string `koanf:"host"`
 	GinMode       string `koanf:"gin_mode"`
 	DefaultDomain string `koanf:"default_domain"`
+}
+
+// JWTConfig represents JWT configuration
+type JWTConfig struct {
+	SecretKey     string        `koanf:"secret_key"`
+	Issuer        string        `koanf:"issuer"`
+	TokenDuration time.Duration `koanf:"token_duration"`
+	RefreshBefore time.Duration `koanf:"refresh_before"`
 }
 
 // DomainConfig represents configuration for a specific domain
@@ -79,6 +92,13 @@ type UserInfo struct {
 	Username string `json:"preferred_username"`
 }
 
+// CustomClaims represents our JWT claims
+type CustomClaims struct {
+	UserInfo UserInfo `json:"user_info"`
+	Domain   string   `json:"domain"`
+	jwt.RegisteredClaims
+}
+
 // DomainHandler holds domain-specific configuration and OAuth client
 type DomainHandler struct {
 	Config      *DomainConfig
@@ -88,6 +108,8 @@ type DomainHandler struct {
 var (
 	config         *Config
 	domainHandlers map[string]*DomainHandler
+	jwtPrivateKey  *rsa.PrivateKey
+	jwtPublicKey   *rsa.PublicKey
 	k              = koanf.New(".")
 
 	// Command line flags
@@ -110,6 +132,12 @@ func loadConfig() error {
 			Host:          "0.0.0.0",
 			GinMode:       "debug",
 			DefaultDomain: "localhost",
+		},
+		JWT: JWTConfig{
+			SecretKey:     "", // Will be generated if empty
+			Issuer:        "sso-auth-service",
+			TokenDuration: time.Hour * 24, // 24 hours
+			RefreshBefore: time.Hour * 2,  // Refresh if expires in 2 hours
 		},
 		Domains: map[string]DomainConfig{},
 	}
@@ -150,6 +178,28 @@ func loadConfig() error {
 	return nil
 }
 
+// initializeJWTKeys initializes RSA keys for JWT signing
+func initializeJWTKeys() error {
+	// Generate RSA private key if secret key is not provided
+	if config.JWT.SecretKey == "" {
+		log.Println("No JWT secret key provided, generating RSA key pair...")
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return fmt.Errorf("failed to generate RSA private key: %w", err)
+		}
+		jwtPrivateKey = privateKey
+		jwtPublicKey = &privateKey.PublicKey
+
+		log.Println("Generated RSA key pair for JWT signing")
+	} else {
+		// If you want to support HMAC signing with a secret key, you can implement that here
+		// For now, we'll stick with RSA which is more secure
+		return fmt.Errorf("HMAC JWT signing not implemented, please remove jwt.secret_key or use RSA")
+	}
+
+	return nil
+}
+
 // setupDomainHandlers creates OAuth configs for each domain
 func setupDomainHandlers() {
 	domainHandlers = make(map[string]*DomainHandler)
@@ -158,11 +208,11 @@ func setupDomainHandlers() {
 		// Create a copy of the domain config
 		cfg := domainConfig
 
-		// Set up OAuth2 config - using /sso_oauth/ prefix
+		// Set up OAuth2 config
 		oauthConfig := &oauth2.Config{
 			ClientID:     cfg.OAuth.ClientID,
 			ClientSecret: cfg.OAuth.ClientSecret,
-			RedirectURL:  cfg.BaseURL + "/sso_oauth/callback", // Added /sso_oauth/ prefix
+			RedirectURL:  cfg.BaseURL + "/sso_oauth/callback",
 			Scopes:       cfg.OAuth.Scopes,
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  cfg.OAuth.AuthURL,
@@ -180,6 +230,68 @@ func setupDomainHandlers() {
 		log.Printf("  Base URL: %s", cfg.BaseURL)
 		log.Printf("  Redirect URL: %s", oauthConfig.RedirectURL)
 	}
+}
+
+// generateJWT creates a JWT token with user information
+func generateJWT(userInfo *UserInfo, domain string) (string, error) {
+	now := time.Now()
+
+	claims := CustomClaims{
+		UserInfo: *userInfo,
+		Domain:   domain,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    config.JWT.Issuer,
+			Subject:   userInfo.Sub,
+			Audience:  []string{domain},
+			ExpiresAt: jwt.NewNumericDate(now.Add(config.JWT.TokenDuration)),
+			NotBefore: jwt.NewNumericDate(now),
+			IssuedAt:  jwt.NewNumericDate(now),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := token.SignedString(jwtPrivateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign JWT: %w", err)
+	}
+
+	return tokenString, nil
+}
+
+// validateJWT validates our own JWT token
+func validateJWT(tokenString string) (*CustomClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
+		// Verify signing method
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return jwtPublicKey, nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JWT: %w", err)
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid JWT token")
+	}
+
+	claims, ok := token.Claims.(*CustomClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid JWT claims type")
+	}
+
+	return claims, nil
+}
+
+// shouldRefreshToken checks if token should be refreshed based on expiration
+func shouldRefreshToken(claims *CustomClaims) bool {
+	if claims.ExpiresAt == nil {
+		return true
+	}
+
+	timeToExpiry := time.Until(claims.ExpiresAt.Time)
+	return timeToExpiry < config.JWT.RefreshBefore
 }
 
 // getDomainHandler returns the appropriate domain handler based on the request
@@ -215,6 +327,11 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Initialize JWT keys
+	if err := initializeJWTKeys(); err != nil {
+		log.Fatalf("Failed to initialize JWT keys: %v", err)
+	}
+
 	// Setup domain handlers
 	setupDomainHandlers()
 
@@ -241,13 +358,16 @@ func main() {
 		ssoGroup.GET("/callback", callbackHandler)
 		ssoGroup.GET("/userinfo", userinfoHandler)
 		ssoGroup.GET("/logout", logoutHandler)
+		ssoGroup.GET("/refresh", refreshHandler) // New refresh endpoint
 	}
 
-	// Health check endpoint (keep without prefix for monitoring)
+	// Health check endpoint
 	r.GET("/health", healthHandler)
 
 	address := fmt.Sprintf("%s:%s", config.Server.Host, config.Server.Port)
 	log.Printf("Starting auth server on %s", address)
+	log.Printf("JWT token duration: %v", config.JWT.TokenDuration)
+	log.Printf("JWT refresh threshold: %v", config.JWT.RefreshBefore)
 	log.Printf("Configured domains: %v", getConfiguredDomains())
 	log.Fatal(r.Run(address))
 }
@@ -261,7 +381,7 @@ func getConfiguredDomains() []string {
 	return domains
 }
 
-// authHandler is the main handler for nginx auth_request
+// authHandler is the main handler for nginx auth_request (now with self-issued JWT validation)
 func authHandler(c *gin.Context) {
 	handler := getDomainHandler(c)
 	if handler == nil {
@@ -270,27 +390,33 @@ func authHandler(c *gin.Context) {
 		return
 	}
 
-	// Check for OAuth token in cookies
-	token, err := c.Cookie(handler.Config.CookieName)
-	if err != nil || token == "" {
+	// Check for JWT token in cookies
+	tokenString, err := c.Cookie(handler.Config.CookieName)
+	if err != nil || tokenString == "" {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
 
-	// Validate the token by checking user info
-	userInfo, err := validateTokenAndGetUserInfo(token, handler.Config.OAuth.UserInfoURL, handler.OAuthConfig)
+	// Validate JWT token
+	claims, err := validateJWT(tokenString)
 	if err != nil {
-		log.Printf("Token validation failed for domain %s: %v", handler.Config.Name, err)
+		log.Printf("JWT validation failed for domain %s: %v", handler.Config.Name, err)
 		c.Status(http.StatusUnauthorized)
 		return
+	}
+
+	// Check if token should be refreshed (optional: auto-refresh)
+	if shouldRefreshToken(claims) {
+		log.Printf("Token for user %s is expiring soon, consider refresh", claims.UserInfo.Username)
+		// You could implement auto-refresh here, or just log it
 	}
 
 	// Set user headers for the upstream application
-	c.Header("X-Auth-User", userInfo.Username)
-	c.Header("X-Auth-Email", userInfo.Email)
-	c.Header("X-Auth-Name", userInfo.Name)
-	c.Header("X-Auth-Subject", userInfo.Sub)
-	c.Header("X-Auth-Domain", handler.Config.Name)
+	c.Header("X-Auth-User", claims.UserInfo.Username)
+	c.Header("X-Auth-Email", claims.UserInfo.Email)
+	c.Header("X-Auth-Name", claims.UserInfo.Name)
+	c.Header("X-Auth-Subject", claims.UserInfo.Sub)
+	c.Header("X-Auth-Domain", claims.Domain)
 
 	// Get original URL from nginx headers
 	originalURL := c.GetHeader("X-Original-URL")
@@ -330,7 +456,7 @@ func loginHandler(c *gin.Context) {
 	c.Redirect(http.StatusTemporaryRedirect, authCodeURL)
 }
 
-// callbackHandler handles OAuth callback
+// callbackHandler handles OAuth callback and issues our own JWT
 func callbackHandler(c *gin.Context) {
 	stateEncoded := c.Query("state")
 	stateBytes, err := base64.URLEncoding.DecodeString(stateEncoded)
@@ -370,7 +496,23 @@ func callbackHandler(c *gin.Context) {
 		return
 	}
 
-	// Set cookie with domain-specific settings
+	// Get user information from OAuth provider
+	userInfo, err := getUserInfoFromProvider(token.AccessToken, handler.Config.OAuth.UserInfoURL, handler.OAuthConfig)
+	if err != nil {
+		log.Printf("Failed to get user info: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"})
+		return
+	}
+
+	// Generate our own JWT token with user information
+	jwtToken, err := generateJWT(userInfo, handler.Config.Name)
+	if err != nil {
+		log.Printf("Failed to generate JWT: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate authentication token"})
+		return
+	}
+
+	// Set JWT cookie with domain-specific settings
 	cookieConfig := handler.Config.Cookie
 	sameSite := http.SameSiteLaxMode
 	switch strings.ToLower(cookieConfig.SameSite) {
@@ -383,13 +525,15 @@ func callbackHandler(c *gin.Context) {
 	c.SetSameSite(sameSite)
 	c.SetCookie(
 		handler.Config.CookieName,
-		token.AccessToken,
+		jwtToken, // Store our JWT instead of OAuth token
 		cookieConfig.MaxAge,
 		cookieConfig.Path,
 		cookieConfig.Domain,
 		cookieConfig.Secure,
 		cookieConfig.HTTPOnly,
 	)
+
+	log.Printf("Successfully authenticated user %s for domain %s", userInfo.Username, handler.Config.Name)
 
 	// Redirect to original URL if present
 	if stateStruct.Next != "" {
@@ -399,7 +543,60 @@ func callbackHandler(c *gin.Context) {
 	}
 }
 
-// userinfoHandler returns user information
+// refreshHandler refreshes JWT token (optional endpoint for frontend use)
+func refreshHandler(c *gin.Context) {
+	handler := getDomainHandler(c)
+	if handler == nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Domain not configured"})
+		return
+	}
+
+	// Get current JWT token
+	tokenString, err := c.Cookie(handler.Config.CookieName)
+	if err != nil || tokenString == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		return
+	}
+
+	// Validate current token (even if expired, we'll check the claims)
+	claims, err := validateJWT(tokenString)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	// Generate new JWT token with same user info
+	newToken, err := generateJWT(&claims.UserInfo, claims.Domain)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
+		return
+	}
+
+	// Update cookie
+	cookieConfig := handler.Config.Cookie
+	sameSite := http.SameSiteLaxMode
+	switch strings.ToLower(cookieConfig.SameSite) {
+	case "strict":
+		sameSite = http.SameSiteStrictMode
+	case "none":
+		sameSite = http.SameSiteNoneMode
+	}
+
+	c.SetSameSite(sameSite)
+	c.SetCookie(
+		handler.Config.CookieName,
+		newToken,
+		cookieConfig.MaxAge,
+		cookieConfig.Path,
+		cookieConfig.Domain,
+		cookieConfig.Secure,
+		cookieConfig.HTTPOnly,
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Token refreshed successfully"})
+}
+
+// userinfoHandler returns user information from JWT
 func userinfoHandler(c *gin.Context) {
 	handler := getDomainHandler(c)
 	if handler == nil {
@@ -407,25 +604,27 @@ func userinfoHandler(c *gin.Context) {
 		return
 	}
 
-	token, err := c.Cookie(handler.Config.CookieName)
-	if err != nil || token == "" {
+	tokenString, err := c.Cookie(handler.Config.CookieName)
+	if err != nil || tokenString == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
 		return
 	}
 
-	userInfo, err := validateTokenAndGetUserInfo(token, handler.Config.OAuth.UserInfoURL, handler.OAuthConfig)
+	claims, err := validateJWT(tokenString)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"user":   userInfo,
-		"domain": handler.Config.Name,
+		"user":       claims.UserInfo,
+		"domain":     claims.Domain,
+		"expires_at": claims.ExpiresAt,
+		"issued_at":  claims.IssuedAt,
 	})
 }
 
-// logoutHandler clears the authentication cookie
+// logoutHandler clears the JWT cookie
 func logoutHandler(c *gin.Context) {
 	handler := getDomainHandler(c)
 	if handler == nil {
@@ -433,7 +632,7 @@ func logoutHandler(c *gin.Context) {
 		return
 	}
 
-	// Clear the cookie with domain-specific settings
+	// Clear the JWT cookie
 	cookieConfig := handler.Config.Cookie
 	c.SetCookie(
 		handler.Config.CookieName,
@@ -462,11 +661,16 @@ func healthHandler(c *gin.Context) {
 			"port":           config.Server.Port,
 			"default_domain": config.Server.DefaultDomain,
 		},
+		"jwt": gin.H{
+			"issuer":         config.JWT.Issuer,
+			"token_duration": config.JWT.TokenDuration.String(),
+			"refresh_before": config.JWT.RefreshBefore.String(),
+		},
 	})
 }
 
-// validateTokenAndGetUserInfo validates the OAuth token and returns user info
-func validateTokenAndGetUserInfo(accessToken, userInfoURL string, oauthConfig *oauth2.Config) (*UserInfo, error) {
+// getUserInfoFromProvider gets user information from OAuth provider (only called during callback)
+func getUserInfoFromProvider(accessToken, userInfoURL string, oauthConfig *oauth2.Config) (*UserInfo, error) {
 	client := oauthConfig.Client(context.Background(), &oauth2.Token{AccessToken: accessToken})
 	resp, err := client.Get(userInfoURL)
 	if err != nil {
