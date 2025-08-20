@@ -36,7 +36,6 @@ type ServerConfig struct {
 // DomainConfig represents configuration for a specific domain
 type DomainConfig struct {
 	Name       string       `koanf:"name"`
-	URLPrefix  string       `koanf:"url_prefix"`
 	CookieName string       `koanf:"cookie_name"`
 	BaseURL    string       `koanf:"base_url"`
 	OAuth      OAuthConfig  `koanf:"oauth"`
@@ -148,11 +147,11 @@ func setupDomainHandlers() {
 		// Create a copy of the domain config
 		cfg := domainConfig
 
-		// Set up OAuth2 config
+		// Set up OAuth2 config - using /sso_oauth/ prefix
 		oauthConfig := &oauth2.Config{
 			ClientID:     cfg.OAuth.ClientID,
 			ClientSecret: cfg.OAuth.ClientSecret,
-			RedirectURL:  cfg.BaseURL + cfg.URLPrefix + "/callback",
+			RedirectURL:  cfg.BaseURL + "/sso_oauth/callback", // Added /sso_oauth/ prefix
 			Scopes:       cfg.OAuth.Scopes,
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  cfg.OAuth.AuthURL,
@@ -166,7 +165,6 @@ func setupDomainHandlers() {
 		}
 
 		log.Printf("Configured domain: %s", domain)
-		log.Printf("  URL Prefix: %s", cfg.URLPrefix)
 		log.Printf("  Cookie Name: %s", cfg.CookieName)
 		log.Printf("  Base URL: %s", cfg.BaseURL)
 		log.Printf("  Redirect URL: %s", oauthConfig.RedirectURL)
@@ -223,35 +221,24 @@ func main() {
 		c.Next()
 	})
 
-	// Register routes for all domain prefixes
-	for _, domainConfig := range config.Domains {
-		registerDomainRoutes(r, domainConfig.URLPrefix)
+	// Register routes with /sso_oauth/ prefix
+	ssoGroup := r.Group("/sso_oauth")
+	{
+		ssoGroup.GET("/auth", authHandler)
+		ssoGroup.HEAD("/auth", authHandler)
+		ssoGroup.GET("/login", loginHandler)
+		ssoGroup.GET("/callback", callbackHandler)
+		ssoGroup.GET("/userinfo", userinfoHandler)
+		ssoGroup.GET("/logout", logoutHandler)
 	}
 
-	// Health check endpoint (always available without prefix)
+	// Health check endpoint (keep without prefix for monitoring)
 	r.GET("/health", healthHandler)
 
 	address := fmt.Sprintf("%s:%s", config.Server.Host, config.Server.Port)
 	log.Printf("Starting auth server on %s", address)
 	log.Printf("Configured domains: %v", getConfiguredDomains())
 	log.Fatal(r.Run(address))
-}
-
-// registerDomainRoutes registers routes for a specific domain prefix
-func registerDomainRoutes(r *gin.Engine, prefix string) {
-	var routes gin.IRoutes
-	if prefix != "" {
-		routes = r.Group(prefix)
-	} else {
-		routes = r
-	}
-
-	routes.GET("/auth", authHandler)
-	routes.HEAD("/auth", authHandler)
-	routes.GET("/login", loginHandler)
-	routes.GET("/callback", callbackHandler)
-	routes.GET("/userinfo", userinfoHandler)
-	routes.GET("/logout", logoutHandler)
 }
 
 // getConfiguredDomains returns a list of configured domain names
